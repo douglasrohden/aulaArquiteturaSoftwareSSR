@@ -1,0 +1,12 @@
+[
+  {
+    "id": "1773102081486",
+    "name": "tes",
+    "description": "teste",
+    "price": 22,
+    "stock": 12,
+    "category": "books",
+    "createdAt": "2026-03-10T00:21:21.486Z",
+    "updatedAt": "2026-03-10T00:21:21.486Z"
+  }
+]

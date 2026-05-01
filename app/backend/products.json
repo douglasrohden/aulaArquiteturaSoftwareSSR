@@ -1,0 +1,52 @@
+[
+  {
+    "id": "1",
+    "name": "Laptop",
+    "description": "A high-performance laptop",
+    "price": 1200,
+    "stock": 50,
+    "category": "Electronics",
+    "createdAt": "2024-07-30T10:00:00Z",
+    "updatedAt": "2024-07-30T10:00:00Z"
+  },
+  {
+    "id": "2",
+    "name": "Smartphone",
+    "description": "A latest model smartphone",
+    "price": 800,
+    "stock": 150,
+    "category": "Electronics",
+    "createdAt": "2024-07-30T10:05:00Z",
+    "updatedAt": "2024-07-30T10:05:00Z"
+  },
+  {
+    "id": "3",
+    "name": "Wireless Headphones",
+    "description": "Noise-cancelling wireless headphones",
+    "price": 150,
+    "stock": 300,
+    "category": "Accessories",
+    "createdAt": "2024-07-30T10:10:00Z",
+    "updatedAt": "2024-07-30T10:10:00Z"
+  },
+  {
+    "id": "4",
+    "name": "Smartwatch",
+    "description": "A smartwatch with fitness tracking",
+    "price": 250,
+    "stock": 100,
+    "category": "Wearables",
+    "createdAt": "2024-07-30T10:15:00Z",
+    "updatedAt": "2024-07-30T10:15:00Z"
+  },
+  {
+    "id": "5",
+    "name": "Gaming Console",
+    "description": "Next-gen gaming console",
+    "price": 500,
+    "stock": 75,
+    "category": "Gaming",
+    "createdAt": "2024-07-30T10:20:00Z",
+    "updatedAt": "2024-07-30T10:20:00Z"
+  }
+]
