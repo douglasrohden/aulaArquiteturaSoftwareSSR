@@ -1,4 +1,4 @@
-import AppSidebar from '@/frontend/components/AppSidebar';
+import AppSidebar from '@/frontend/components/AppSidebar'; 
 import '@/frontend/styles/globals.css';
 
 export const metadata = {
@@ -12,7 +12,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="pt">
+    <html lang="pt" dir="ltr">
       <body className="antialiased">
         <div className="flex min-h-screen flex-col bg-gray-50 md:flex-row">
           <AppSidebar />

@@ -1,51 +1,106 @@
 'use server';
 
-// SERVER ACTION - Runs only on the server
-import { User, CreateUserInput } from '@/backend/types/user';
-import { getAllUsers, getUserById, getUserByEmail, createUser, updateUser, deleteUser } from '@/backend/db';
+import {
+  PublicUser,
+  CreateUserInput,
+  UpdateUserBody,
+  toPublicUser,
+} from '@/backend/types/user';
+import {
+  getAllUsers,
+  getUserById,
+  getUserByEmail,
+  createUser,
+  updateUserFromInput,
+  deleteUser,
+  type UserProfileUpdate,
+} from '@/backend/db';
+import { hashPassword } from '@/backend/lib/password';
 
-export async function serverGetUsers(): Promise<User[]> {
-  return await getAllUsers();
+function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
 }
 
-export async function serverGetUserById(id: string): Promise<User | null> {
-  return await getUserById(id);
+export async function serverGetUsers(): Promise<PublicUser[]> {
+  const rows = await getAllUsers();
+  return rows.map(toPublicUser);
 }
 
-export async function serverGetUserByEmail(email: string): Promise<User | null> {
-  return await getUserByEmail(email);
+export async function serverGetUserById(id: string): Promise<PublicUser | null> {
+  const row = await getUserById(id);
+  return row ? toPublicUser(row) : null;
 }
 
-export async function serverCreateUser(data: CreateUserInput): Promise<User> {
-  // Validation on server side
+export async function serverGetUserByEmail(
+  email: string
+): Promise<PublicUser | null> {
+  const row = await getUserByEmail(normalizeEmail(email));
+  return row ? toPublicUser(row) : null;
+}
+
+export async function serverCreateUser(data: CreateUserInput): Promise<PublicUser> {
   if (!data.name || !data.name.trim()) {
     throw new Error('User name is required');
   }
-  
+
   if (!data.email || !data.email.trim()) {
     throw new Error('Email is required');
   }
-  
+
   if (!data.password || data.password.length < 6) {
     throw new Error('Password must be at least 6 characters long');
   }
 
-  // Check if email already exists
-  const existingUser = await getUserByEmail(data.email);
+  const email = normalizeEmail(data.email);
+  const existingUser = await getUserByEmail(email);
   if (existingUser) {
     throw new Error('Email already registered');
   }
 
-  return await createUser(data);
+  const password_hash = await hashPassword(data.password);
+
+  const row = await createUser({
+    name: data.name.trim(),
+    email,
+    password_hash,
+    phone: data.phone,
+    avatar: data.avatar,
+    bio: data.bio,
+    profile_id: data.profile_id ?? undefined,
+  });
+
+  return toPublicUser(row);
 }
 
 export async function serverUpdateUser(
   id: string,
-  data: Partial<CreateUserInput>
-): Promise<User | null> {
-  return await updateUser(id, data);
+  data: UpdateUserBody
+): Promise<PublicUser | null> {
+  const { password, ...fields } = data;
+
+  let password_hash: string | undefined;
+  if (password !== undefined && password !== '') {
+    if (password.length < 6) {
+      throw new Error('Password must be at least 6 characters long');
+    }
+    password_hash = await hashPassword(password);
+  }
+
+  const payload: UserProfileUpdate = {};
+
+  if (fields.name !== undefined) payload.name = fields.name.trim();
+  if (fields.email !== undefined)
+    payload.email = normalizeEmail(fields.email);
+  if (fields.phone !== undefined) payload.phone = fields.phone;
+  if (fields.avatar !== undefined) payload.avatar = fields.avatar;
+  if (fields.bio !== undefined) payload.bio = fields.bio;
+  if (fields.profile_id !== undefined) payload.profile_id = fields.profile_id;
+  if (password_hash !== undefined) payload.password_hash = password_hash;
+
+  const updated = await updateUserFromInput(id, payload);
+  return updated ? toPublicUser(updated) : null;
 }
 
 export async function serverDeleteUser(id: string): Promise<boolean> {
-  return await deleteUser(id);
+  return deleteUser(id);
 }

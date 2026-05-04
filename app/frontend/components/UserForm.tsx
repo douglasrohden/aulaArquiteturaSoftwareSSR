@@ -1,13 +1,17 @@
 'use client';
 
-import { useState, FormEvent, ChangeEvent } from 'react';
-import { CreateUserInput } from '@/backend/types/user';
+import { useState, useEffect, FormEvent, ChangeEvent } from 'react';
+import { CreateUserInput } from '@/backend/types/user'; 
 
 interface UserFormProps {
   onSuccess?: () => void;
 }
 
+type ProfileOption = { id: string; name: string };
+
 export default function UserForm({ onSuccess }: UserFormProps) {
+ 
+  const [profiles, setProfiles] = useState<ProfileOption[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
@@ -15,10 +19,30 @@ export default function UserForm({ onSuccess }: UserFormProps) {
     name: '',
     email: '',
     password: '',
+    profile_id: '',
   });
 
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/access/profiles', {
+          headers: { ...(authHeaders as Record<string, string>) },
+        });
+        if (!res.ok) return;
+        const data = (await res.json()) as ProfileOption[];
+        if (!cancelled && Array.isArray(data)) setProfiles(data);
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [authHeaders]);
+
   const handleChange = (
-    e: ChangeEvent<HTMLInputElement>
+    e: ChangeEvent<HTMLInputElement | HTMLSelectElement>
   ) => {
     const { name, value } = e.target;
     setFormData(prev => ({
@@ -38,8 +62,16 @@ export default function UserForm({ onSuccess }: UserFormProps) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          ...(authHeaders as Record<string, string>),
         },
-        body: JSON.stringify(formData),
+        body: JSON.stringify({
+          name: formData.name,
+          email: formData.email,
+          password: formData.password,
+          ...(formData.profile_id && String(formData.profile_id).trim() !== ''
+            ? { profile_id: formData.profile_id }
+            : {}),
+        } satisfies CreateUserInput),
       });
 
       if (!response.ok) {
@@ -52,6 +84,7 @@ export default function UserForm({ onSuccess }: UserFormProps) {
         name: '',
         email: '',
         password: '',
+        profile_id: '',
       });
       onSuccess?.();
     } catch (err) {
@@ -108,6 +141,26 @@ export default function UserForm({ onSuccess }: UserFormProps) {
           />
         </div>
         
+        <div>
+          <label htmlFor="profile_id" className="block text-sm font-medium text-gray-700">
+            Perfil de acesso
+          </label>
+          <select
+            id="profile_id"
+            name="profile_id"
+            value={formData.profile_id ?? ''}
+            onChange={handleChange}
+            className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+          >
+            <option value="">Padrão (Administrador)</option>
+            {profiles.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </div>
+
         <div>
           <label htmlFor="password" className="block text-sm font-medium text-gray-700">
             Senha

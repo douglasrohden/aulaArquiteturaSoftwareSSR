@@ -5,9 +5,15 @@ import { CreateProductInput } from '@/backend/types';
 
 interface ProductFormProps {
   onSuccess?: () => void;
+  authHeaders?: HeadersInit;
+  disabled?: boolean;
 }
 
-export default function ProductForm({ onSuccess }: ProductFormProps) {
+export default function ProductForm({
+  onSuccess,
+  authHeaders,
+  disabled,
+}: ProductFormProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
@@ -40,6 +46,7 @@ export default function ProductForm({ onSuccess }: ProductFormProps) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          ...(authHeaders as Record<string, string>),
         },
         body: JSON.stringify(formData),
       });
@@ -68,6 +75,14 @@ export default function ProductForm({ onSuccess }: ProductFormProps) {
       setLoading(false);
     }
   };
+
+  if (disabled) {
+    return (
+      <div className="mx-auto w-full max-w-2xl rounded-lg bg-gray-50 p-6 text-center text-gray-600 shadow-inner">
+        Sem permissão para incluir produtos neste perfil.
+      </div>
+    );
+  }
 
   return (
     <form onSubmit={handleSubmit} className="w-full max-w-2xl mx-auto p-6 bg-white rounded-lg shadow-md">

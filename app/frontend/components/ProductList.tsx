@@ -6,9 +6,16 @@ import { useState } from 'react';
 interface ProductListProps {
   initialProducts: Product[];
   onProductDeleted?: () => void;
+  authHeaders?: HeadersInit;
+  canDelete?: boolean;
 }
 
-export default function ProductList({ initialProducts, onProductDeleted }: ProductListProps) {
+export default function ProductList({
+  initialProducts,
+  onProductDeleted,
+  authHeaders,
+  canDelete = true,
+}: ProductListProps) {
   const [products, setProducts] = useState<Product[]>(initialProducts);
   const [loading, setLoading] = useState(false);
 
@@ -19,8 +26,11 @@ export default function ProductList({ initialProducts, onProductDeleted }: Produ
 
     setLoading(true);
     try {
-      const response = await fetch(`/api/products?id=${id}`, {
+      const response = await fetch(`/api/products?id=${encodeURIComponent(id)}`, {
         method: 'DELETE',
+        headers: {
+          ...(authHeaders as Record<string, string>),
+        },
       });
 
       if (!response.ok) {
@@ -56,7 +66,11 @@ export default function ProductList({ initialProducts, onProductDeleted }: Produ
               <th className="px-6 py-3 text-left text-sm font-semibold text-gray-700">Preço</th>
               <th className="px-6 py-3 text-left text-sm font-semibold text-gray-700">Estoque</th>
               <th className="px-6 py-3 text-left text-sm font-semibold text-gray-700">Criado em</th>
-              <th className="px-6 py-3 text-center text-sm font-semibold text-gray-700">Ações</th>
+              {canDelete ? (
+                <th className="px-6 py-3 text-center text-sm font-semibold text-gray-700">
+                  Ações
+                </th>
+              ) : null}
             </tr>
           </thead>
           <tbody>
@@ -84,15 +98,18 @@ export default function ProductList({ initialProducts, onProductDeleted }: Produ
                 <td className="px-6 py-4 text-sm text-gray-600">
                   {new Date(product.createdAt).toLocaleDateString()}
                 </td>
-                <td className="px-6 py-4 text-sm text-center">
-                  <button
-                    onClick={() => handleDelete(product.id)}
-                    disabled={loading}
-                    className="text-red-500 hover:text-red-700 disabled:text-gray-400 font-semibold transition"
-                  >
-                    Excluir
-                  </button>
-                </td>
+                {canDelete ? (
+                  <td className="px-6 py-4 text-sm text-center">
+                    <button
+                      type="button"
+                      onClick={() => handleDelete(product.id)}
+                      disabled={loading}
+                      className="text-red-500 hover:text-red-700 disabled:text-gray-400 font-semibold transition"
+                    >
+                      Excluir
+                    </button>
+                  </td>
+                ) : null}
               </tr>
             ))}
           </tbody>
