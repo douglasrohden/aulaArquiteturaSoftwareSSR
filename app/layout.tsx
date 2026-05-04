@@ -1,3 +1,4 @@
+import AppSidebar from '@/frontend/components/AppSidebar';
 import '@/frontend/styles/globals.css';
 
 export const metadata = {
@@ -12,7 +13,12 @@ export default function RootLayout({
 }) {
   return (
     <html lang="pt">
-      <body>{children}</body>
+      <body className="antialiased">
+        <div className="flex min-h-screen flex-col bg-gray-50 md:flex-row">
+          <AppSidebar />
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-auto">{children}</div>
+        </div>
+      </body>
     </html>
   );
 }
