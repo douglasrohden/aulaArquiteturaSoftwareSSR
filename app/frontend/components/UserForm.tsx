@@ -5,11 +5,12 @@ import { CreateUserInput } from '@/backend/types/user';
 
 interface UserFormProps {
   onSuccess?: () => void;
+  authHeaders?: HeadersInit;
 }
 
 type ProfileOption = { id: string; name: string };
 
-export default function UserForm({ onSuccess }: UserFormProps) {
+export default function UserForm({ onSuccess, authHeaders }: UserFormProps) {
  
   const [profiles, setProfiles] = useState<ProfileOption[]>([]);
   const [loading, setLoading] = useState(false);
@@ -27,7 +28,9 @@ export default function UserForm({ onSuccess }: UserFormProps) {
     (async () => {
       try {
         const res = await fetch('/api/access/profiles', {
-          headers: { ...(authHeaders as Record<string, string>) },
+          headers: {
+            ...(authHeaders ? (authHeaders as Record<string, string>) : {}),
+          },
         });
         if (!res.ok) return;
         const data = (await res.json()) as ProfileOption[];
@@ -62,7 +65,7 @@ export default function UserForm({ onSuccess }: UserFormProps) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(authHeaders as Record<string, string>),
+          ...(authHeaders ? (authHeaders as Record<string, string>) : {}),
         },
         body: JSON.stringify({
           name: formData.name,

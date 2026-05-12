@@ -12,7 +12,7 @@ import {
 
 export async function GET(request: Request) {
   try {
-    const uid = getUserIdFromRequest(request);
+    const uid = await getUserIdFromRequest(request);
     await assertScreenAccess(uid, 'products', 'view');
     const products = await serverGetProducts();
     return NextResponse.json(products);
@@ -24,7 +24,7 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
-    const uid = getUserIdFromRequest(request);
+    const uid = await getUserIdFromRequest(request);
     await assertScreenAccess(uid, 'products', 'add');
     const data = await request.json();
     const product = await serverCreateProduct(data);
@@ -37,7 +37,7 @@ export async function POST(request: Request) {
 
 export async function PUT(request: Request) {
   try {
-    const uid = getUserIdFromRequest(request);
+    const uid = await getUserIdFromRequest(request);
     await assertScreenAccess(uid, 'products', 'edit');
     const { id, ...fields } = await request.json();
     const updated = await serverUpdateProduct(id, fields);
@@ -50,7 +50,7 @@ export async function PUT(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
-    const uid = getUserIdFromRequest(request);
+    const uid = await getUserIdFromRequest(request);
     await assertScreenAccess(uid, 'products', 'delete');
     let id: string | null = null;
     try {

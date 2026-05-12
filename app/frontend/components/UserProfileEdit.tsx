@@ -8,6 +8,7 @@ interface UserProfileEditProps {
   user: User;
   onSuccess?: () => void;
   onCancel?: () => void;
+  authHeaders?: HeadersInit;
 }
 
 type ProfileOption = { id: string; name: string };
@@ -16,6 +17,7 @@ export default function UserProfileEdit({
   user,
   onSuccess,
   onCancel,
+  authHeaders,
 }: UserProfileEditProps) { 
   const [profiles, setProfiles] = useState<ProfileOption[]>([]);
   const [loading, setLoading] = useState(false);
@@ -34,7 +36,9 @@ export default function UserProfileEdit({
     (async () => {
       try {
         const res = await fetch('/api/access/profiles', {
-          headers: { ...(authHeaders as Record<string, string>) },
+          headers: {
+            ...(authHeaders ? (authHeaders as Record<string, string>) : {}),
+          },
         });
         if (!res.ok) return;
         const data = (await res.json()) as ProfileOption[];
@@ -80,7 +84,7 @@ export default function UserProfileEdit({
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
-          ...(authHeaders as Record<string, string>),
+          ...(authHeaders ? (authHeaders as Record<string, string>) : {}),
         },
         body: JSON.stringify(body),
       });

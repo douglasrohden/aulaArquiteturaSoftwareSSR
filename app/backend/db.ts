@@ -1,6 +1,5 @@
-// Server-side database initialization and connection
-import sqlite3 from 'sqlite3';
-import path from 'path';
+// Server-side database — Neon (PostgreSQL) via @neondatabase/serverless
+import { Pool } from '@neondatabase/serverless';
 import { Product, CreateProductInput } from './types';
 import { StoredUser, InsertUserRow } from './types/user';
 import {
@@ -13,34 +12,88 @@ import {
   emptyPermissionMatrix,
 } from './types/access';
 
-const DATA_DIR = path.join(process.cwd(), '.data');
-const DB_PATH = path.join(DATA_DIR, 'products.db');
-
-let db: sqlite3.Database;
-
-function exec(sql: string, params: unknown[] = []): Promise<void> {
-  return new Promise((resolve, reject) => {
-    db.run(sql, params, (err) => (err ? reject(err) : resolve()));
-  });
+declare global {
+  // eslint-disable-next-line no-var -- singleton across HMR / serverless warm starts
+  var __neonPool: Pool | undefined;
 }
 
-function queryAll<T>(sql: string, params: unknown[] = []): Promise<T[]> {
-  return new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) =>
-      err ? reject(err) : resolve(rows as T[])
+function getPool(): Pool {
+  const url = process.env.DATABASE_URL;
+  if (!url?.trim()) {
+    throw new Error(
+      'DATABASE_URL não está definido. Crie um projeto em https://neon.tech e cole a connection string no .env.local.'
     );
-  });
+  }
+  if (!globalThis.__neonPool) {
+    globalThis.__neonPool = new Pool({ connectionString: url });
+  }
+  return globalThis.__neonPool;
 }
 
-function queryOne<T>(sql: string, params: unknown[] = []): Promise<T | null> {
-  return new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) =>
-      err ? reject(err) : resolve((row as T) ?? null)
+/** Converte placeholders estilo SQLite (`?`) para PostgreSQL (`$1`, `$2`, …). */
+function preparePg(sqliteStyle: string, paramCount: number): string {
+  let i = 0;
+  const text = sqliteStyle.replace(/\?/g, () => `$${++i}`);
+  if (i !== paramCount) {
+    throw new Error(
+      `Incompatibilidade de parâmetros SQL: ${i} placeholders, ${paramCount} valores.`
     );
-  });
+  }
+  return text;
+}
+
+/** Execução direta (usada nas migrações, sem `ensureMigrated`). */
+async function execRaw(sql: string, params: unknown[] = []): Promise<void> {
+  await getPool().query(preparePg(sql, params.length), params);
+}
+
+async function queryRawAll<T>(sql: string, params: unknown[] = []): Promise<T[]> {
+  const { rows } = await getPool().query(preparePg(sql, params.length), params);
+  return rows as T[];
+}
+
+async function queryRawOne<T>(sql: string, params: unknown[] = []): Promise<T | null> {
+  const { rows } = await getPool().query(preparePg(sql, params.length), params);
+  return (rows[0] as T | undefined) ?? null;
+}
+
+let migrationsPromise: Promise<void> | null = null;
+
+async function ensureMigrated(): Promise<void> {
+  if (!migrationsPromise) {
+    migrationsPromise = runMigrations().catch((err) => {
+      migrationsPromise = null;
+      throw err;
+    });
+  }
+  await migrationsPromise;
+}
+
+async function exec(sql: string, params: unknown[] = []): Promise<void> {
+  await ensureMigrated();
+  await execRaw(sql, params);
+}
+
+async function queryAll<T>(sql: string, params: unknown[] = []): Promise<T[]> {
+  await ensureMigrated();
+  return queryRawAll<T>(sql, params);
+}
+
+async function queryOne<T>(sql: string, params: unknown[] = []): Promise<T | null> {
+  await ensureMigrated();
+  return queryRawOne<T>(sql, params);
 }
 
 function rowToStoredUser(row: Record<string, unknown>): StoredUser {
+  const activeRaw = row.isActive;
+  const isActive =
+    activeRaw === null || activeRaw === undefined
+      ? true
+      : activeRaw === true ||
+        activeRaw === 't' ||
+        activeRaw === 'true' ||
+        Number(activeRaw) === 1;
+
   return {
     id: String(row.id),
     name: String(row.name),
@@ -53,10 +106,7 @@ function rowToStoredUser(row: Record<string, unknown>): StoredUser {
       row.role != null && (row.role === 'admin' || row.role === 'user')
         ? row.role
         : null,
-    isActive:
-      row.isActive === null || row.isActive === undefined
-        ? true
-        : Number(row.isActive) === 1,
+    isActive,
     profile_id:
       row.profile_id !== undefined && row.profile_id !== null
         ? String(row.profile_id)
@@ -67,34 +117,43 @@ function rowToStoredUser(row: Record<string, unknown>): StoredUser {
 }
 
 async function migrateUsersTable(): Promise<void> {
-  let cols = await queryAll<{ name: string }>('PRAGMA table_info(users)');
-  if (cols.length === 0) {
-    return;
-  }
+  const exists = await queryRawOne<{ exists: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM information_schema.tables
+       WHERE table_schema = 'public' AND table_name = 'users'
+     ) AS exists`,
+    []
+  );
+  if (!exists?.exists) return;
 
-  let names = new Set(cols.map((c) => c.name));
+  const cols = await queryRawAll<{ column_name: string }>(
+    `SELECT column_name FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = 'users'`,
+    []
+  );
+  const names = new Set(cols.map((c) => c.column_name));
 
   if (names.has('password') && !names.has('password_hash')) {
-    await exec('ALTER TABLE users RENAME COLUMN password TO password_hash');
-    cols = await queryAll<{ name: string }>('PRAGMA table_info(users)');
-    names = new Set(cols.map((c) => c.name));
+    await execRaw('ALTER TABLE users RENAME COLUMN password TO password_hash');
+    names.delete('password');
+    names.add('password_hash');
   }
 
-  const addColumn = async (columnName: string, columnDef: string) => {
+  const addColumn = async (columnName: string, sqlName: string, columnDef: string) => {
     if (!names.has(columnName)) {
-      await exec(`ALTER TABLE users ADD COLUMN ${columnName} ${columnDef}`);
+      await execRaw(`ALTER TABLE users ADD COLUMN ${sqlName} ${columnDef}`);
     }
   };
 
-  await addColumn('phone', 'TEXT');
-  await addColumn('avatar', 'TEXT');
-  await addColumn('bio', 'TEXT');
-  await addColumn('role', 'TEXT');
-  await addColumn('isActive', 'INTEGER NOT NULL DEFAULT 1');
+  await addColumn('phone', 'phone', 'TEXT');
+  await addColumn('avatar', 'avatar', 'TEXT');
+  await addColumn('bio', 'bio', 'TEXT');
+  await addColumn('role', 'role', 'TEXT');
+  await addColumn('isActive', '"isActive"', 'BOOLEAN NOT NULL DEFAULT TRUE');
 }
 
 async function migrateAccessControl(): Promise<void> {
-  await exec(`
+  await execRaw(`
     CREATE TABLE IF NOT EXISTS screens (
       key TEXT PRIMARY KEY,
       label TEXT NOT NULL,
@@ -102,24 +161,24 @@ async function migrateAccessControl(): Promise<void> {
     )
   `);
 
-  await exec(`
+  await execRaw(`
     CREATE TABLE IF NOT EXISTS access_profiles (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL UNIQUE,
       description TEXT,
-      createdAt TEXT NOT NULL,
-      updatedAt TEXT NOT NULL
+      "createdAt" TEXT NOT NULL,
+      "updatedAt" TEXT NOT NULL
     )
   `);
 
-  await exec(`
+  await execRaw(`
     CREATE TABLE IF NOT EXISTS profile_screen_permissions (
       profile_id TEXT NOT NULL,
       screen_key TEXT NOT NULL,
-      can_view INTEGER NOT NULL DEFAULT 0,
-      can_add INTEGER NOT NULL DEFAULT 0,
-      can_edit INTEGER NOT NULL DEFAULT 0,
-      can_delete INTEGER NOT NULL DEFAULT 0,
+      can_view BOOLEAN NOT NULL DEFAULT FALSE,
+      can_add BOOLEAN NOT NULL DEFAULT FALSE,
+      can_edit BOOLEAN NOT NULL DEFAULT FALSE,
+      can_delete BOOLEAN NOT NULL DEFAULT FALSE,
       PRIMARY KEY (profile_id, screen_key),
       FOREIGN KEY (profile_id) REFERENCES access_profiles(id) ON DELETE CASCADE,
       FOREIGN KEY (screen_key) REFERENCES screens(key) ON DELETE CASCADE
@@ -132,31 +191,36 @@ async function migrateAccessControl(): Promise<void> {
     ['users', 'Usuários', 3],
   ];
   for (const [key, label, sort_order] of screenSeeds) {
-    await exec(
-      `INSERT OR IGNORE INTO screens (key, label, sort_order) VALUES (?, ?, ?)`,
+    await execRaw(
+      `INSERT INTO screens (key, label, sort_order) VALUES (?, ?, ?)
+       ON CONFLICT (key) DO NOTHING`,
       [key, label, sort_order]
     );
   }
 
-  const userCols = await queryAll<{ name: string }>('PRAGMA table_info(users)');
-  const userNames = new Set(userCols.map((c) => c.name));
+  const userCols = await queryRawAll<{ column_name: string }>(
+    `SELECT column_name FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = 'users'`,
+    []
+  );
+  const userNames = new Set(userCols.map((c) => c.column_name));
   if (!userNames.has('profile_id')) {
-    await exec(
+    await execRaw(
       'ALTER TABLE users ADD COLUMN profile_id TEXT REFERENCES access_profiles(id) ON DELETE SET NULL'
     );
   }
 
   const now = new Date().toISOString();
 
-  let adminRow = await queryOne<{ id: string }>(
+  let adminRow = await queryRawOne<{ id: string }>(
     'SELECT id FROM access_profiles WHERE name = ? LIMIT 1',
     ['Administrador']
   );
   let adminProfileId: string;
   if (!adminRow) {
     adminProfileId = Date.now().toString();
-    await exec(
-      `INSERT INTO access_profiles (id, name, description, createdAt, updatedAt)
+    await execRaw(
+      `INSERT INTO access_profiles (id, name, description, "createdAt", "updatedAt")
        VALUES (?, ?, ?, ?, ?)`,
       [
         adminProfileId,
@@ -167,33 +231,35 @@ async function migrateAccessControl(): Promise<void> {
       ]
     );
     for (const key of SCREEN_KEYS) {
-      await exec(
-        `INSERT OR IGNORE INTO profile_screen_permissions
+      await execRaw(
+        `INSERT INTO profile_screen_permissions
          (profile_id, screen_key, can_view, can_add, can_edit, can_delete)
-         VALUES (?, ?, 1, 1, 1, 1)`,
+         VALUES (?, ?, TRUE, TRUE, TRUE, TRUE)
+         ON CONFLICT (profile_id, screen_key) DO NOTHING`,
         [adminProfileId, key]
       );
     }
   } else {
     adminProfileId = adminRow.id;
     for (const key of SCREEN_KEYS) {
-      await exec(
-        `INSERT OR IGNORE INTO profile_screen_permissions
+      await execRaw(
+        `INSERT INTO profile_screen_permissions
          (profile_id, screen_key, can_view, can_add, can_edit, can_delete)
-         VALUES (?, ?, 1, 1, 1, 1)`,
+         VALUES (?, ?, TRUE, TRUE, TRUE, TRUE)
+         ON CONFLICT (profile_id, screen_key) DO NOTHING`,
         [adminProfileId, key]
       );
     }
   }
 
-  let readerRow = await queryOne<{ id: string }>(
+  let readerRow = await queryRawOne<{ id: string }>(
     'SELECT id FROM access_profiles WHERE name = ? LIMIT 1',
     ['Leitor']
   );
   if (!readerRow) {
     const readerId = (Date.now() + 1).toString();
-    await exec(
-      `INSERT INTO access_profiles (id, name, description, createdAt, updatedAt)
+    await execRaw(
+      `INSERT INTO access_profiles (id, name, description, "createdAt", "updatedAt")
        VALUES (?, ?, ?, ?, ?)`,
       [
         readerId,
@@ -204,35 +270,35 @@ async function migrateAccessControl(): Promise<void> {
       ]
     );
     for (const key of SCREEN_KEYS) {
-      await exec(
+      await execRaw(
         `INSERT INTO profile_screen_permissions
          (profile_id, screen_key, can_view, can_add, can_edit, can_delete)
-         VALUES (?, ?, 1, 0, 0, 0)`,
+         VALUES (?, ?, TRUE, FALSE, FALSE, FALSE)`,
         [readerId, key]
       );
     }
   }
 
-  await exec('UPDATE users SET profile_id = ? WHERE profile_id IS NULL', [
+  await execRaw('UPDATE users SET profile_id = ? WHERE profile_id IS NULL', [
     adminProfileId,
   ]);
 }
 
 async function runMigrations(): Promise<void> {
-  await exec(`
+  await execRaw(`
     CREATE TABLE IF NOT EXISTS products (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       description TEXT,
-      price REAL NOT NULL,
+      price DOUBLE PRECISION NOT NULL,
       stock INTEGER NOT NULL,
       category TEXT,
-      createdAt TEXT NOT NULL,
-      updatedAt TEXT NOT NULL
+      "createdAt" TEXT NOT NULL,
+      "updatedAt" TEXT NOT NULL
     )
   `);
 
-  await exec(`
+  await execRaw(`
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -242,9 +308,9 @@ async function runMigrations(): Promise<void> {
       avatar TEXT,
       bio TEXT,
       role TEXT,
-      isActive INTEGER NOT NULL DEFAULT 1,
-      createdAt TEXT NOT NULL,
-      updatedAt TEXT NOT NULL
+      "isActive" BOOLEAN NOT NULL DEFAULT TRUE,
+      "createdAt" TEXT NOT NULL,
+      "updatedAt" TEXT NOT NULL
     )
   `);
 
@@ -253,146 +319,97 @@ async function runMigrations(): Promise<void> {
 }
 
 export function initDatabase(): Promise<void> {
-  return new Promise((resolve, reject) => {
-    require('fs').mkdirSync(DATA_DIR, { recursive: true });
-
-    db = new sqlite3.Database(DB_PATH, (err) => {
-      if (err) {
-        console.error('Error opening database:', err);
-        reject(err);
-        return;
-      }
-      db.run('PRAGMA foreign_keys = ON');
-      runMigrations()
-        .then(resolve)
-        .catch((e) => {
-          console.error('Migration error:', e);
-          reject(e);
-        });
-    });
-  });
+  return ensureMigrated();
 }
 
-initDatabase().catch(console.error);
-
-export function getAllProducts(): Promise<Product[]> {
-  return new Promise((resolve, reject) => {
-    db.all('SELECT * FROM products', (err, rows: Product[]) => {
-      if (err) {
-        reject(err);
-      } else {
-        resolve(rows);
-      }
-    });
-  });
+export async function getAllProducts(): Promise<Product[]> {
+  const rows = await queryAll<Product>('SELECT * FROM products');
+  return rows.map((r) => ({
+    ...r,
+    price: Number(r.price),
+    stock: Number(r.stock),
+  }));
 }
 
-export function getProductById(id: string): Promise<Product | null> {
-  return new Promise((resolve, reject) => {
-    db.get('SELECT * FROM products WHERE id = ?', [id], (err, row: Product) => {
-      if (err) {
-        reject(err);
-      } else {
-        resolve(row || null);
-      }
-    });
-  });
+export async function getProductById(id: string): Promise<Product | null> {
+  const row = await queryOne<Product>('SELECT * FROM products WHERE id = ?', [id]);
+  if (!row) return null;
+  return {
+    ...row,
+    price: Number(row.price),
+    stock: Number(row.stock),
+  };
 }
 
-export function createProduct(data: CreateProductInput): Promise<Product> {
-  return new Promise((resolve, reject) => {
-    const id = Date.now().toString();
-    const createdAt = new Date().toISOString();
-    const updatedAt = createdAt;
+export async function createProduct(data: CreateProductInput): Promise<Product> {
+  const id = Date.now().toString();
+  const createdAt = new Date().toISOString();
+  const updatedAt = createdAt;
 
-    db.run(
-      `
-      INSERT INTO products (id, name, description, price, stock, category, createdAt, updatedAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `,
-      [
-        id,
-        data.name,
-        data.description,
-        data.price,
-        data.stock,
-        data.category,
-        createdAt,
-        updatedAt,
-      ],
-      function (err) {
-        if (err) {
-          reject(err);
-        } else {
-          resolve({
-            id,
-            ...data,
-            createdAt,
-            updatedAt,
-          });
-        }
-      }
-    );
-  });
+  await exec(
+    `
+    INSERT INTO products (id, name, description, price, stock, category, "createdAt", "updatedAt")
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `,
+    [
+      id,
+      data.name,
+      data.description,
+      data.price,
+      data.stock,
+      data.category,
+      createdAt,
+      updatedAt,
+    ]
+  );
+
+  return {
+    id,
+    ...data,
+    createdAt,
+    updatedAt,
+  };
 }
 
-export function updateProduct(
+export async function updateProduct(
   id: string,
   data: Partial<CreateProductInput>
 ): Promise<Product | null> {
-  return new Promise(async (resolve, reject) => {
-    try {
-      const existing = await getProductById(id);
-      if (!existing) {
-        resolve(null);
-        return;
-      }
+  const existing = await getProductById(id);
+  if (!existing) return null;
 
-      const updatedData = {
-        ...existing,
-        ...data,
-        updatedAt: new Date().toISOString(),
-      };
+  const updatedData: Product = {
+    ...existing,
+    ...data,
+    updatedAt: new Date().toISOString(),
+  };
 
-      db.run(
-        `
-        UPDATE products
-        SET name = ?, description = ?, price = ?, stock = ?, category = ?, updatedAt = ?
-        WHERE id = ?
-      `,
-        [
-          updatedData.name,
-          updatedData.description,
-          updatedData.price,
-          updatedData.stock,
-          updatedData.category,
-          updatedData.updatedAt,
-          id,
-        ],
-        function (err) {
-          if (err) {
-            reject(err);
-          } else {
-            resolve(updatedData);
-          }
-        }
-      );
-    } catch (err) {
-      reject(err);
-    }
-  });
+  await exec(
+    `
+    UPDATE products
+    SET name = ?, description = ?, price = ?, stock = ?, category = ?, "updatedAt" = ?
+    WHERE id = ?
+  `,
+    [
+      updatedData.name,
+      updatedData.description,
+      updatedData.price,
+      updatedData.stock,
+      updatedData.category,
+      updatedData.updatedAt,
+      id,
+    ]
+  );
+
+  return updatedData;
 }
 
-export function deleteProduct(id: string): Promise<boolean> {
-  return new Promise((resolve, reject) => {
-    db.run('DELETE FROM products WHERE id = ?', [id], function (err) {
-      if (err) {
-        reject(err);
-      } else {
-        resolve(this.changes > 0);
-      }
-    });
-  });
+export async function deleteProduct(id: string): Promise<boolean> {
+  await ensureMigrated();
+  const { rowCount } = await getPool().query(preparePg('DELETE FROM products WHERE id = ?', 1), [
+    id,
+  ]);
+  return (rowCount ?? 0) > 0;
 }
 
 function emptyToNull(s: string | null | undefined): string | null {
@@ -412,160 +429,114 @@ export async function getDefaultAdminProfileId(): Promise<string> {
   return row.id;
 }
 
-export function getAllUsers(): Promise<StoredUser[]> {
-  return new Promise((resolve, reject) => {
-    db.all('SELECT * FROM users', (err, rows: Record<string, unknown>[]) => {
-      if (err) {
-        reject(err);
-      } else {
-        resolve((rows || []).map((r) => rowToStoredUser(r)));
-      }
-    });
-  });
+export async function getAllUsers(): Promise<StoredUser[]> {
+  const rows = await queryAll<Record<string, unknown>>('SELECT * FROM users');
+  return rows.map((r) => rowToStoredUser(r));
 }
 
-export function getUserById(id: string): Promise<StoredUser | null> {
-  return new Promise((resolve, reject) => {
-    db.get(
-      'SELECT * FROM users WHERE id = ?',
-      [id],
-      (err, row: Record<string, unknown>) => {
-        if (err) {
-          reject(err);
-        } else {
-          resolve(row ? rowToStoredUser(row) : null);
-        }
-      }
-    );
-  });
+export async function getUserById(id: string): Promise<StoredUser | null> {
+  const row = await queryOne<Record<string, unknown>>('SELECT * FROM users WHERE id = ?', [id]);
+  return row ? rowToStoredUser(row) : null;
 }
 
-export function getUserByEmail(email: string): Promise<StoredUser | null> {
-  return new Promise((resolve, reject) => {
-    db.get(
-      'SELECT * FROM users WHERE email = ?',
-      [email],
-      (err, row: Record<string, unknown>) => {
-        if (err) {
-          reject(err);
-        } else {
-          resolve(row ? rowToStoredUser(row) : null);
-        }
-      }
-    );
-  });
+export async function getUserByEmail(email: string): Promise<StoredUser | null> {
+  const row = await queryOne<Record<string, unknown>>('SELECT * FROM users WHERE email = ?', [
+    email,
+  ]);
+  return row ? rowToStoredUser(row) : null;
 }
 
-export function createUser(data: InsertUserRow): Promise<StoredUser> {
-  return (async () => {
-    const id = Date.now().toString();
-    const createdAt = new Date().toISOString();
-    const updatedAt = createdAt;
-    const phone = emptyToNull(data.phone);
-    const avatar = emptyToNull(data.avatar);
-    const bio = emptyToNull(data.bio);
-    const role = data.role ?? null;
-    const isActive = data.isActive !== undefined ? (data.isActive ? 1 : 0) : 1;
-    let profileId = emptyToNull(data.profile_id as string | undefined);
-    if (!profileId) {
-      profileId = await getDefaultAdminProfileId();
-    }
+export async function createUser(data: InsertUserRow): Promise<StoredUser> {
+  const id = Date.now().toString();
+  const createdAt = new Date().toISOString();
+  const updatedAt = createdAt;
+  const phone = emptyToNull(data.phone);
+  const avatar = emptyToNull(data.avatar);
+  const bio = emptyToNull(data.bio);
+  const role = data.role ?? null;
+  const isActive =
+    data.isActive !== undefined ? Boolean(data.isActive) : true;
+  let profileId = emptyToNull(data.profile_id as string | undefined);
+  if (!profileId) {
+    profileId = await getDefaultAdminProfileId();
+  }
 
-    await new Promise<void>((resolve, reject) => {
-      db.run(
-        `
-        INSERT INTO users (
-          id, name, email, password_hash, phone, avatar, bio, role, isActive, profile_id, createdAt, updatedAt
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `,
-        [
-          id,
-          data.name,
-          data.email,
-          data.password_hash,
-          phone,
-          avatar,
-          bio,
-          role,
-          isActive,
-          profileId,
-          createdAt,
-          updatedAt,
-        ],
-        (err) => (err ? reject(err) : resolve())
-      );
-    });
+  await exec(
+    `
+    INSERT INTO users (
+      id, name, email, password_hash, phone, avatar, bio, role, "isActive", profile_id, "createdAt", "updatedAt"
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `,
+    [
+      id,
+      data.name,
+      data.email,
+      data.password_hash,
+      phone,
+      avatar,
+      bio,
+      role,
+      isActive,
+      profileId,
+      createdAt,
+      updatedAt,
+    ]
+  );
 
-    const created = await getUserById(id);
-    if (!created) throw new Error('Failed to load user after insert');
-    return created;
-  })();
+  const created = await getUserById(id);
+  if (!created) throw new Error('Failed to load user after insert');
+  return created;
 }
 
-export function updateUser(
+export async function updateUser(
   id: string,
   data: Partial<Omit<StoredUser, 'id' | 'createdAt'>>
 ): Promise<StoredUser | null> {
-  return new Promise(async (resolve, reject) => {
-    try {
-      const existing = await getUserById(id);
-      if (!existing) {
-        resolve(null);
-        return;
-      }
+  const existing = await getUserById(id);
+  if (!existing) return null;
 
-      const merged: StoredUser = {
-        ...existing,
-        ...data,
-        id: existing.id,
-        createdAt: existing.createdAt,
-        updatedAt: new Date().toISOString(),
-      };
+  const merged: StoredUser = {
+    ...existing,
+    ...data,
+    id: existing.id,
+    createdAt: existing.createdAt,
+    updatedAt: new Date().toISOString(),
+  };
 
-      const phone = emptyToNull(merged.phone ?? undefined);
-      const avatar = emptyToNull(merged.avatar ?? undefined);
-      const bio = emptyToNull(merged.bio ?? undefined);
-      const role = merged.role ?? null;
-      const isActive = merged.isActive !== undefined && merged.isActive !== null
-        ? merged.isActive
-          ? 1
-          : 0
-        : 1;
+  const phone = emptyToNull(merged.phone ?? undefined);
+  const avatar = emptyToNull(merged.avatar ?? undefined);
+  const bio = emptyToNull(merged.bio ?? undefined);
+  const role = merged.role ?? null;
+  const isActive =
+    merged.isActive !== undefined && merged.isActive !== null
+      ? Boolean(merged.isActive)
+      : true;
 
-      const profileId = emptyToNull(merged.profile_id ?? undefined);
+  const profileId = emptyToNull(merged.profile_id ?? undefined);
 
-      db.run(
-        `
-        UPDATE users
-        SET name = ?, email = ?, password_hash = ?, phone = ?, avatar = ?, bio = ?, role = ?, isActive = ?, profile_id = ?, updatedAt = ?
-        WHERE id = ?
-      `,
-        [
-          merged.name,
-          merged.email,
-          merged.password_hash,
-          phone,
-          avatar,
-          bio,
-          role,
-          isActive,
-          profileId,
-          merged.updatedAt,
-          id,
-        ],
-        function (err) {
-          if (err) {
-            reject(err);
-            return;
-          }
-          getUserById(id).then(resolve).catch(reject);
-        }
-      );
-    } catch (err) {
-      reject(err);
-    }
-  });
+  await exec(
+    `
+    UPDATE users
+    SET name = ?, email = ?, password_hash = ?, phone = ?, avatar = ?, bio = ?, role = ?, "isActive" = ?, profile_id = ?, "updatedAt" = ?
+    WHERE id = ?
+  `,
+    [
+      merged.name,
+      merged.email,
+      merged.password_hash,
+      phone,
+      avatar,
+      bio,
+      role,
+      isActive,
+      profileId,
+      merged.updatedAt,
+      id,
+    ]
+  );
+
+  return getUserById(id);
 }
 
 export type UserProfileUpdate = Partial<
@@ -573,43 +544,36 @@ export type UserProfileUpdate = Partial<
 > & { password_hash?: string };
 
 /** Merge profile fields and optional new password hash; preserves role and isActive. */
-export function updateUserFromInput(
+export async function updateUserFromInput(
   id: string,
   data: UserProfileUpdate
 ): Promise<StoredUser | null> {
-  return getUserById(id).then((existing) => {
-    if (!existing) return null;
-    return updateUser(id, {
-      name: data.name ?? existing.name,
-      email: data.email ?? existing.email,
-      password_hash: data.password_hash ?? existing.password_hash,
-      phone:
-        data.phone !== undefined ? emptyToNull(data.phone) : existing.phone,
-      avatar:
-        data.avatar !== undefined
-          ? emptyToNull(data.avatar)
-          : existing.avatar,
-      bio: data.bio !== undefined ? emptyToNull(data.bio) : existing.bio,
-      profile_id:
-        data.profile_id !== undefined
-          ? emptyToNull(data.profile_id as string)
-          : existing.profile_id,
-      role: existing.role,
-      isActive: existing.isActive,
-    });
+  const existing = await getUserById(id);
+  if (!existing) return null;
+  return updateUser(id, {
+    name: data.name ?? existing.name,
+    email: data.email ?? existing.email,
+    password_hash: data.password_hash ?? existing.password_hash,
+    phone:
+      data.phone !== undefined ? emptyToNull(data.phone) : existing.phone,
+    avatar:
+      data.avatar !== undefined
+        ? emptyToNull(data.avatar)
+        : existing.avatar,
+    bio: data.bio !== undefined ? emptyToNull(data.bio) : existing.bio,
+    profile_id:
+      data.profile_id !== undefined
+        ? emptyToNull(data.profile_id as string)
+        : existing.profile_id,
+    role: existing.role,
+    isActive: existing.isActive,
   });
 }
 
-export function deleteUser(id: string): Promise<boolean> {
-  return new Promise((resolve, reject) => {
-    db.run('DELETE FROM users WHERE id = ?', [id], function (err) {
-      if (err) {
-        reject(err);
-      } else {
-        resolve(this.changes > 0);
-      }
-    });
-  });
+export async function deleteUser(id: string): Promise<boolean> {
+  await ensureMigrated();
+  const { rowCount } = await getPool().query(preparePg('DELETE FROM users WHERE id = ?', 1), [id]);
+  return (rowCount ?? 0) > 0;
 }
 
 export async function getAllScreens(): Promise<ScreenRow[]> {
@@ -633,7 +597,7 @@ export async function getAllAccessProfiles(): Promise<AccessProfileRow[]> {
     createdAt: string;
     updatedAt: string;
   }>(
-    'SELECT id, name, description, createdAt, updatedAt FROM access_profiles ORDER BY name ASC'
+    'SELECT id, name, description, "createdAt", "updatedAt" FROM access_profiles ORDER BY name ASC'
   );
   return rows.map((r) => ({
     id: r.id,
@@ -649,10 +613,10 @@ export async function getPermissionMatrixForProfile(
 ): Promise<PermissionMatrix> {
   const rows = await queryAll<{
     screen_key: string;
-    can_view: number;
-    can_add: number;
-    can_edit: number;
-    can_delete: number;
+    can_view: boolean;
+    can_add: boolean;
+    can_edit: boolean;
+    can_delete: boolean;
   }>(
     `SELECT screen_key, can_view, can_add, can_edit, can_delete
      FROM profile_screen_permissions WHERE profile_id = ?`,
@@ -684,30 +648,39 @@ export async function replaceProfilePermissions(
   profileId: string,
   rows: ProfilePermissionInput[]
 ): Promise<void> {
-  await exec('BEGIN IMMEDIATE');
+  await ensureMigrated();
+  const pool = getPool();
+  const client = await pool.connect();
   try {
-    await exec('DELETE FROM profile_screen_permissions WHERE profile_id = ?', [
-      profileId,
-    ]);
+    await client.query('BEGIN');
+    await client.query(
+      preparePg('DELETE FROM profile_screen_permissions WHERE profile_id = ?', 1),
+      [profileId]
+    );
     for (const r of rows) {
-      await exec(
-        `INSERT INTO profile_screen_permissions
+      await client.query(
+        preparePg(
+          `INSERT INTO profile_screen_permissions
          (profile_id, screen_key, can_view, can_add, can_edit, can_delete)
          VALUES (?, ?, ?, ?, ?, ?)`,
+          6
+        ),
         [
           profileId,
           r.screen_key,
-          r.can_view ? 1 : 0,
-          r.can_add ? 1 : 0,
-          r.can_edit ? 1 : 0,
-          r.can_delete ? 1 : 0,
+          r.can_view,
+          r.can_add,
+          r.can_edit,
+          r.can_delete,
         ]
       );
     }
-    await exec('COMMIT');
+    await client.query('COMMIT');
   } catch (e) {
-    await exec('ROLLBACK');
+    await client.query('ROLLBACK');
     throw e;
+  } finally {
+    client.release();
   }
 }
 
@@ -719,11 +692,11 @@ export async function createAccessProfile(
   const now = new Date().toISOString();
   const desc = description === undefined ? null : emptyToNull(description);
   await exec(
-    `INSERT INTO access_profiles (id, name, description, createdAt, updatedAt)
+    `INSERT INTO access_profiles (id, name, description, "createdAt", "updatedAt")
      VALUES (?, ?, ?, ?, ?)`,
     [id, name.trim(), desc, now, now]
   );
-  const defaults: ProfilePermissionInput[] = SCREEN_KEYS.map((key) => ({
+  const defaults: ProfilePermissionInput[] = SCREEN_KEYS.map((key: ScreenKey) => ({
     screen_key: key,
     can_view: false,
     can_add: false,
@@ -737,7 +710,7 @@ export async function createAccessProfile(
     description: string | null;
     createdAt: string;
     updatedAt: string;
-  }>('SELECT id, name, description, createdAt, updatedAt FROM access_profiles WHERE id = ?', [
+  }>('SELECT id, name, description, "createdAt", "updatedAt" FROM access_profiles WHERE id = ?', [
     id,
   ]);
   if (!row) throw new Error('Falha ao criar perfil de acesso.');
@@ -745,8 +718,8 @@ export async function createAccessProfile(
 }
 
 export async function deleteAccessProfile(id: string): Promise<void> {
-  const usage = await queryOne<{ n: number }>(
-    'SELECT COUNT(*) AS n FROM users WHERE profile_id = ?',
+  const usage = await queryOne<{ n: string }>(
+    'SELECT COUNT(*)::text AS n FROM users WHERE profile_id = ?',
     [id]
   );
   if (usage && Number(usage.n) > 0) {

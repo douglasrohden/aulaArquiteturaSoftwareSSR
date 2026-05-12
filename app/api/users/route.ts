@@ -12,7 +12,7 @@ import {
 
 export async function GET(request: Request) {
   try {
-    const uid = getUserIdFromRequest(request);
+    const uid = await getUserIdFromRequest(request);
     await assertScreenAccess(uid, 'users', 'view');
     const users = await serverGetUsers();
     return NextResponse.json(users);
@@ -24,7 +24,7 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
-    const uid = getUserIdFromRequest(request);
+    const uid = await getUserIdFromRequest(request);
     await assertScreenAccess(uid, 'users', 'add');
     const data = await request.json();
     const user = await serverCreateUser(data);
@@ -37,7 +37,7 @@ export async function POST(request: Request) {
 
 export async function PUT(request: Request) {
   try {
-    const uid = getUserIdFromRequest(request);
+    const uid = await getUserIdFromRequest(request);
     await assertScreenAccess(uid, 'users', 'edit');
     const { id, ...fields } = await request.json();
     if (!id) {
@@ -53,7 +53,7 @@ export async function PUT(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
-    const uid = getUserIdFromRequest(request);
+    const uid = await getUserIdFromRequest(request);
     await assertScreenAccess(uid, 'users', 'delete');
     const { id } = await request.json();
     const success = await serverDeleteUser(id);
