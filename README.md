@@ -31,6 +31,12 @@ Acesse a pasta do projeto:
 cd aulaArquiteturaSoftwareSSR
 ```
 
+Configure a API do OpenRouter (modelo [Grok Build 0.1](https://openrouter.ai/x-ai/grok-build-0.1)):
+
+1. Crie uma chave em [openrouter.ai/settings/keys](https://openrouter.ai/settings/keys)
+2. Copie `.env.example` para `.env.local` (se ainda não existir)
+3. Cole a chave em `OPENROUTER_API_KEY` no arquivo `.env.local`
+
 Instale as dependências:
 
 ```bash
