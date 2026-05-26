@@ -12,7 +12,7 @@ import {
 
 export async function GET(request: Request) {
   try {
-    const uid = await getUserIdFromRequest(request);
+    const uid = await  getUserIdFromRequest(request);
     await assertScreenAccess(uid, 'users', 'view');
     const users = await serverGetUsers();
     return NextResponse.json(users);
